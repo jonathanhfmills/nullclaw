@@ -69,7 +69,7 @@ const VertexBase = union(enum) {
         return switch (self) {
             .config => "base_url config",
             .env => "VERTEX_BASE_URL env var",
-            .derived => "VERTEX_PROJECT_ID/VERTEX_LOCATION env vars",
+            .derived => "derived project/location",
         };
     }
 };
@@ -907,6 +907,16 @@ test "provider creates with explicit token and base_url" {
     try std.testing.expectEqualStrings("base_url config", p.endpointSource());
 }
 
+test "buildAuthHeader uses explicit bearer token" {
+    const alloc = std.testing.allocator;
+    var p = VertexProvider.init(alloc, "ya29.explicit", "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models");
+    defer VertexProvider.deinitImpl(@ptrCast(&p));
+
+    const auth_header = try p.buildAuthHeader(alloc);
+    defer alloc.free(auth_header);
+    try std.testing.expectEqualStrings("Authorization: Bearer ya29.explicit", auth_header);
+}
+
 test "parseServiceAccountCredentials extracts required fields" {
     const alloc = std.testing.allocator;
     const raw =
@@ -919,6 +929,22 @@ test "parseServiceAccountCredentials extracts required fields" {
     try std.testing.expectEqualStrings("svc@proj-vertex.iam.gserviceaccount.com", creds.client_email);
     try std.testing.expect(std.mem.indexOf(u8, creds.private_key, "BEGIN PRIVATE KEY") != null);
     try std.testing.expectEqualStrings("https://oauth2.googleapis.com/token", creds.token_uri);
+}
+
+test "buildAuthHeader uses service-account oauth2 token exchange path" {
+    const alloc = std.testing.allocator;
+    const raw =
+        \\{"project_id":"proj-oauth2","client_email":"svc@proj-oauth2.iam.gserviceaccount.com","private_key":"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n"}
+    ;
+    var p = VertexProvider.init(alloc, raw, null);
+    defer VertexProvider.deinitImpl(@ptrCast(&p));
+
+    const auth_header = try p.buildAuthHeader(alloc);
+    defer alloc.free(auth_header);
+
+    try std.testing.expectEqualStrings("Authorization: Bearer test-vertex-service-account-token", auth_header);
+    try std.testing.expect(p.cached_service_account_token != null);
+    try std.testing.expectEqualStrings("derived project/location", p.endpointSource());
 }
 
 test "resolveAuth accepts config service account json" {
