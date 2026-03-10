@@ -969,21 +969,18 @@ pub const Agent = struct {
         self.context_was_compacted = false;
         commands.refreshSubagentToolContext(self);
 
+        const turn_input = commands.planTurnInput(user_message);
         const effective_user_message = blk: {
-            if (commands.bareSessionResetPrompt(user_message)) |fresh_prompt| {
-                // Preserve slash side-effects (/new|/reset session clear), but route bare command
-                // through a fresh-session prompt instead of returning command text.
-                if (try self.handleSlashCommand(user_message)) |slash_response| {
+            if (turn_input.invoke_local_handler) {
+                const slash_response = (try self.handleSlashCommand(user_message)) orelse return error.SlashCommandDispatchMismatch;
+                if (turn_input.llm_user_message) |llm_user_message| {
+                    // Bare /new and /reset clear session state first, then continue as a fresh LLM turn.
                     self.allocator.free(slash_response);
+                    break :blk llm_user_message;
                 }
-                break :blk fresh_prompt;
+                return slash_response;
             }
-
-            // Handle regular slash commands before sending to LLM (saves tokens).
-            if (try self.handleSlashCommand(user_message)) |response| {
-                return response;
-            }
-            break :blk user_message;
+            break :blk turn_input.llm_user_message orelse user_message;
         };
 
         // Inject system prompt on first turn (or when tracked workspace files changed).

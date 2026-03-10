@@ -20,7 +20,6 @@ const memory_mod = @import("memory/root.zig");
 const Memory = memory_mod.Memory;
 const observability = @import("observability.zig");
 const Observer = observability.Observer;
-const control_plane = @import("control_plane.zig");
 const tools_mod = @import("tools/root.zig");
 const Tool = tools_mod.Tool;
 const SecurityPolicy = @import("security/policy.zig").SecurityPolicy;
@@ -52,21 +51,6 @@ fn persistedAssistantReply(agent: *const Agent, response: []const u8) []const u8
     const last = agent.history.items[agent.history.items.len - 1];
     if (last.role != .assistant) return response;
     return last.content;
-}
-
-fn clearsPersistedSession(message: []const u8) bool {
-    const cmd = control_plane.parseSlashCommand(message) orelse return false;
-    return control_plane.isSlashName(cmd, "new") or
-        control_plane.isSlashName(cmd, "reset") or
-        control_plane.isSlashName(cmd, "restart");
-}
-
-fn persistedUserMessage(message: []const u8) ?[]const u8 {
-    if (agent_mod.commands.bareSessionResetPrompt(message)) |fresh_prompt| {
-        return fresh_prompt;
-    }
-    if (control_plane.parseSlashCommand(message) != null) return null;
-    return message;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -432,6 +416,7 @@ pub const SessionManager = struct {
             session.agent.stream_ctx = null;
         }
 
+        const turn_input = agent_mod.commands.planTurnInput(content);
         const response = try session.agent.turn(content);
         session.turn_count += 1;
         session.last_active = std.time.timestamp();
@@ -443,18 +428,18 @@ pub const SessionManager = struct {
 
         // Persist messages via session store
         if (self.session_store) |store| {
-            if (clearsPersistedSession(content)) {
+            if (turn_input.clear_session) {
                 // Clear persisted messages on session reset
                 store.clearMessages(session_key) catch {};
                 // Clear stale auto-saved memories
                 store.clearAutoSaved(session_key) catch {};
             }
 
-            if (persistedUserMessage(content)) |persisted_user| {
+            if (turn_input.llm_user_message) |persisted_user| {
                 // Persist canonical conversation history.
-                // Slash-only commands are skipped, but bare /new and /reset
-                // become a fresh-session prompt + assistant reply turn and
-                // must be preserved across reloads.
+                // Local-only slash commands are skipped, but any input that
+                // reached the LLM must persist with the exact same routing
+                // decision used by Agent.turn().
                 // When the turn ends with an assistant history message, prefer
                 // that canonical text over the rendered reply so restored
                 // sessions do not replay /usage footers or reasoning blocks.
@@ -1600,6 +1585,58 @@ test "processMessage bare /new persists fresh-session turn across reload" {
 
 test "processMessage bare /reset with mention persists fresh-session turn across reload" {
     try expectResetTurnPersistsFreshSession("/reset@nullclaw_bot:");
+}
+
+test "processMessage slash-prefixed prompt that is not a local command persists across reload" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+
+    var sqlite_mem = try memory_mod.SqliteMemory.init(testing.allocator, ":memory:");
+    defer sqlite_mem.deinit();
+
+    var noop = observability.NoopObserver{};
+    var sm = SessionManager.init(
+        testing.allocator,
+        &cfg,
+        mock.provider(),
+        &.{},
+        sqlite_mem.memory(),
+        noop.observer(),
+        sqlite_mem.sessionStore(),
+        null,
+    );
+    defer sm.deinit();
+
+    const session_key = "telegram:main:slash-path";
+    const slash_prompt = "/etc/hosts";
+    const response = try sm.processMessage(session_key, slash_prompt, .{
+        .channel = "telegram",
+        .is_group = false,
+        .group_id = null,
+    });
+    defer testing.allocator.free(response);
+
+    const expected_tokens = @as(u64, agent_mod.estimate_text_tokens("ok"));
+    const store = sqlite_mem.sessionStore();
+    const entries = try store.loadMessages(testing.allocator, session_key);
+    defer memory_mod.freeMessages(testing.allocator, entries);
+    try testing.expectEqual(@as(usize, 2), entries.len);
+    try testing.expectEqualStrings("user", entries[0].role);
+    try testing.expectEqualStrings(slash_prompt, entries[0].content);
+    try testing.expectEqualStrings("assistant", entries[1].role);
+    try testing.expectEqualStrings("ok", entries[1].content);
+    try testing.expectEqual(@as(?u64, expected_tokens), try store.loadUsage(session_key));
+
+    const live_session = try sm.getOrCreate(session_key);
+    try testing.expectEqual(expected_tokens, live_session.agent.total_tokens);
+    live_session.last_active = 0;
+    try testing.expectEqual(@as(usize, 1), sm.evictIdle(1));
+
+    const restored = try sm.getOrCreate(session_key);
+    try testing.expectEqual(expected_tokens, restored.agent.total_tokens);
+    try testing.expectEqual(@as(usize, 2), restored.agent.historyLen());
+    try testing.expectEqualStrings(slash_prompt, restored.agent.history.items[0].content);
+    try testing.expectEqualStrings("ok", restored.agent.history.items[1].content);
 }
 
 test "processMessage different keys — independent sessions" {

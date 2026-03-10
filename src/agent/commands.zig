@@ -29,6 +29,98 @@ pub fn bareSessionResetPrompt(message: []const u8) ?[]const u8 {
     return BARE_SESSION_RESET_PROMPT;
 }
 
+pub const TurnInputPlan = struct {
+    clear_session: bool = false,
+    invoke_local_handler: bool = false,
+    llm_user_message: ?[]const u8 = null,
+};
+
+fn slashClearsSession(cmd: SlashCommand) bool {
+    return isSlashName(cmd, "new") or
+        isSlashName(cmd, "reset") or
+        isSlashName(cmd, "restart");
+}
+
+fn isLocallyHandledSlashCommand(cmd: SlashCommand) bool {
+    return slashClearsSession(cmd) or
+        isSlashName(cmd, "help") or
+        isSlashName(cmd, "commands") or
+        isSlashName(cmd, "status") or
+        isSlashName(cmd, "whoami") or
+        isSlashName(cmd, "id") or
+        isSlashName(cmd, "model") or
+        isSlashName(cmd, "models") or
+        isSlashName(cmd, "think") or
+        isSlashName(cmd, "thinking") or
+        isSlashName(cmd, "t") or
+        isSlashName(cmd, "verbose") or
+        isSlashName(cmd, "v") or
+        isSlashName(cmd, "reasoning") or
+        isSlashName(cmd, "reason") or
+        isSlashName(cmd, "exec") or
+        isSlashName(cmd, "queue") or
+        isSlashName(cmd, "usage") or
+        isSlashName(cmd, "tts") or
+        isSlashName(cmd, "voice") or
+        isSlashName(cmd, "stop") or
+        isSlashName(cmd, "abort") or
+        isSlashName(cmd, "compact") or
+        isSlashName(cmd, "allowlist") or
+        isSlashName(cmd, "approve") or
+        isSlashName(cmd, "context") or
+        isSlashName(cmd, "export-session") or
+        isSlashName(cmd, "export") or
+        isSlashName(cmd, "session") or
+        isSlashName(cmd, "subagents") or
+        isSlashName(cmd, "agents") or
+        isSlashName(cmd, "focus") or
+        isSlashName(cmd, "unfocus") or
+        isSlashName(cmd, "kill") or
+        isSlashName(cmd, "steer") or
+        isSlashName(cmd, "tell") or
+        isSlashName(cmd, "config") or
+        isSlashName(cmd, "capabilities") or
+        isSlashName(cmd, "debug") or
+        isSlashName(cmd, "dock-telegram") or
+        isSlashName(cmd, "dock_telegram") or
+        isSlashName(cmd, "dock-discord") or
+        isSlashName(cmd, "dock_discord") or
+        isSlashName(cmd, "dock-slack") or
+        isSlashName(cmd, "dock_slack") or
+        isSlashName(cmd, "activation") or
+        isSlashName(cmd, "send") or
+        isSlashName(cmd, "elevated") or
+        isSlashName(cmd, "elev") or
+        isSlashName(cmd, "bash") or
+        isSlashName(cmd, "poll") or
+        isSlashName(cmd, "skill") or
+        isSlashName(cmd, "doctor") or
+        isSlashName(cmd, "memory");
+}
+
+pub fn planTurnInput(message: []const u8) TurnInputPlan {
+    const cmd = parseSlashCommand(message) orelse return .{ .llm_user_message = message };
+    const clear_session = slashClearsSession(cmd);
+
+    if (bareSessionResetPrompt(message)) |fresh_prompt| {
+        return .{
+            .clear_session = clear_session,
+            .invoke_local_handler = true,
+            .llm_user_message = fresh_prompt,
+        };
+    }
+
+    if (isLocallyHandledSlashCommand(cmd)) {
+        return .{
+            .clear_session = clear_session,
+            .invoke_local_handler = true,
+            .llm_user_message = null,
+        };
+    }
+
+    return .{ .llm_user_message = message };
+}
+
 fn firstToken(arg: []const u8) []const u8 {
     var it = std.mem.tokenizeAny(u8, arg, " \t");
     return it.next() orelse "";
@@ -233,6 +325,27 @@ test "bareSessionResetPrompt returns prompt for bare /reset with mention" {
 
 test "bareSessionResetPrompt ignores /reset with argument" {
     try std.testing.expect(bareSessionResetPrompt("/reset gpt-4o-mini") == null);
+}
+
+test "planTurnInput routes bare reset through local clear and llm prompt" {
+    const plan = planTurnInput("/reset@nullclaw_bot:");
+    try std.testing.expect(plan.clear_session);
+    try std.testing.expect(plan.invoke_local_handler);
+    try std.testing.expectEqualStrings(BARE_SESSION_RESET_PROMPT, plan.llm_user_message.?);
+}
+
+test "planTurnInput keeps unknown slash-prefixed text on llm path" {
+    const plan = planTurnInput("/etc/hosts");
+    try std.testing.expect(!plan.clear_session);
+    try std.testing.expect(!plan.invoke_local_handler);
+    try std.testing.expectEqualStrings("/etc/hosts", plan.llm_user_message.?);
+}
+
+test "planTurnInput keeps known slash commands local-only" {
+    const plan = planTurnInput("/help");
+    try std.testing.expect(!plan.clear_session);
+    try std.testing.expect(plan.invoke_local_handler);
+    try std.testing.expect(plan.llm_user_message == null);
 }
 
 test "hotApplyConfigChange updates model primary as provider plus model" {
