@@ -202,6 +202,15 @@ pub const Config = struct {
         return null;
     }
 
+    /// Look up the configured API mode for a provider.
+    /// Returns .chat_completions by default.
+    pub fn getProviderApiMode(self: *const Config, name: []const u8) config_types.ProviderEntry.ApiMode {
+        for (self.providers) |e| {
+            if (provider_names.providerNamesMatch(e.name, name)) return e.api_mode;
+        }
+        return .chat_completions;
+    }
+
     /// Sync flat convenience fields from the nested sub-configs.
     pub fn syncFlatFields(self: *Config) void {
         self.temperature = self.default_temperature;
@@ -617,6 +626,13 @@ pub const Config = struct {
                         has_field = true;
                     }
                 }
+                if (comptime @hasField(ProviderEntry, "api_mode")) {
+                    if (entry.api_mode != .chat_completions) {
+                        if (has_field) try w.print(", ", .{});
+                        try w.print("\"api_mode\": \"{s}\"", .{entry.api_mode.toSlice()});
+                        has_field = true;
+                    }
+                }
                 try w.print("}}", .{});
                 if (i + 1 < self.providers.len) try w.print(",", .{});
                 try w.print("\n", .{});
@@ -857,6 +873,7 @@ pub const Config = struct {
         InvalidWebRelayPairingCodeTtl,
         InvalidWebRelayUiTokenTtl,
         InvalidWebRelayTokenTtl,
+        InvalidProviderApiMode,
     };
 
     pub fn validate(self: *const Config) ValidationError!void {
@@ -901,6 +918,11 @@ pub const Config = struct {
         }
         if (!config_types.HttpRequestConfig.isValidSearchProviderName(self.http_request.search_provider)) {
             return ValidationError.InvalidHttpSearchProvider;
+        }
+        for (self.providers) |provider| {
+            if (provider.api_mode == .invalid) {
+                return ValidationError.InvalidProviderApiMode;
+            }
         }
         for (self.http_request.search_fallback_providers) |provider| {
             if (!config_types.HttpRequestConfig.isValidSearchFallbackProviderName(provider)) {
@@ -998,6 +1020,7 @@ pub const Config = struct {
             ValidationError.InvalidWebRelayPairingCodeTtl => std.debug.print("Config error: channels.web.accounts.<id>.relay_pairing_code_ttl_secs must be in [60, 300].\n", .{}),
             ValidationError.InvalidWebRelayUiTokenTtl => std.debug.print("Config error: channels.web.accounts.<id>.relay_ui_token_ttl_secs must be in [300, 2592000].\n", .{}),
             ValidationError.InvalidWebRelayTokenTtl => std.debug.print("Config error: channels.web.accounts.<id>.relay_token_ttl_secs must be in [3600, 31536000].\n", .{}),
+            ValidationError.InvalidProviderApiMode => std.debug.print("Config error: models.providers.<name>.api_mode must be 'chat_completions' or 'responses'.\n", .{}),
         }
     }
 
@@ -3333,6 +3356,37 @@ test "save writes provider native_tools when false" {
     try std.testing.expect(std.mem.indexOf(u8, content, "\"user_agent\": \"nullclaw-test/1.0\"") != null);
 }
 
+test "save writes provider api_mode when responses" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.json", .{base});
+    defer allocator.free(config_path);
+
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.providers = &.{.{
+        .name = "sub2api",
+        .api_key = "sk-test",
+        .api_mode = .responses,
+    }};
+
+    try cfg.save();
+
+    const file = try std.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 64 * 1024);
+    defer allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"api_mode\": \"responses\"") != null);
+}
+
 test "save escapes provider string fields" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -3425,6 +3479,46 @@ test "provider config lookups match canonical aliases" {
     try std.testing.expectEqualStrings("https://resource.openai.azure.com/openai/v1", cfg.getProviderBaseUrl("azure_openai").?);
     try std.testing.expect(!cfg.getProviderNativeTools("azure-openai"));
     try std.testing.expectEqualStrings("nullclaw-test/1.0", cfg.getProviderUserAgent("azure_openai").?);
+}
+
+test "provider config parse reads api_mode responses" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"agents":{"defaults":{"model":{"primary":"sub2api/gpt-5.4"}}},"models":{"providers":{"sub2api":{"api_key":"sk-test","api_mode":"responses"}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    defer {
+        allocator.free(cfg.default_provider);
+        allocator.free(cfg.default_model.?);
+        for (cfg.providers) |e| {
+            allocator.free(e.name);
+            if (e.api_key) |k| allocator.free(k);
+            if (e.base_url) |b| allocator.free(b);
+            if (e.user_agent) |ua| allocator.free(ua);
+        }
+        allocator.free(cfg.providers);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.providers.len);
+    try std.testing.expectEqual(config_types.ProviderEntry.ApiMode.responses, cfg.providers[0].api_mode);
+    try std.testing.expectEqual(config_types.ProviderEntry.ApiMode.responses, cfg.getProviderApiMode("sub2api"));
+}
+
+test "validate rejects invalid provider api_mode" {
+    const cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .allocator = std.testing.allocator,
+        .default_provider = "sub2api",
+        .default_model = "gpt-5.4",
+        .providers = &.{.{
+            .name = "sub2api",
+            .api_mode = .invalid,
+        }},
+    };
+
+    try std.testing.expectError(Config.ValidationError.InvalidProviderApiMode, cfg.validate());
 }
 
 test "providers defaults to empty" {

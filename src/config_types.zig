@@ -36,6 +36,26 @@ pub const SandboxBackend = enum {
 // ── Provider entry (for "providers" config section) ─────────────
 
 pub const ProviderEntry = struct {
+    pub const ApiMode = enum {
+        chat_completions,
+        responses,
+        invalid,
+
+        pub fn parse(raw: []const u8) ApiMode {
+            if (std.mem.eql(u8, raw, "chat_completions")) return .chat_completions;
+            if (std.mem.eql(u8, raw, "responses")) return .responses;
+            return .invalid;
+        }
+
+        pub fn toSlice(self: ApiMode) []const u8 {
+            return switch (self) {
+                .chat_completions => "chat_completions",
+                .responses => "responses",
+                .invalid => "invalid",
+            };
+        }
+    };
+
     name: []const u8,
     /// Provider credential payload.
     /// Usually a string API key/token.
@@ -49,6 +69,8 @@ pub const ProviderEntry = struct {
     /// Optional User-Agent header for HTTP requests to this provider.
     /// When set, requests will include "User-Agent: {value}" header.
     user_agent: ?[]const u8 = null,
+    /// Primary OpenAI-compatible protocol to use for this provider.
+    api_mode: ApiMode = .chat_completions,
 };
 
 // ── Audio media config (tools.media.audio) ─────────────────────
