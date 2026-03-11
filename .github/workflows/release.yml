@@ -29,6 +29,16 @@ jobs:
             zig_cpu: ""
             ext: ""
           - os: ubuntu-latest
+            target: linux-arm32-gnu
+            zig_target: arm-linux-gnueabihf
+            zig_cpu: ""
+            ext: ""
+          - os: ubuntu-latest
+            target: linux-arm32-musl
+            zig_target: arm-linux-musleabihf
+            zig_cpu: ""
+            ext: ""
+          - os: ubuntu-latest
             target: linux-riscv64
             zig_target: riscv64-linux-musl
             zig_cpu: ""
@@ -149,6 +159,8 @@ jobs:
         run: |
           mv nullclaw-linux-x86_64/nullclaw nullclaw-linux-x86_64.bin
           mv nullclaw-linux-aarch64/nullclaw nullclaw-linux-aarch64.bin
+          mv nullclaw-linux-arm32-gnu/nullclaw nullclaw-linux-arm32-gnu.bin
+          mv nullclaw-linux-arm32-musl/nullclaw nullclaw-linux-arm32-musl.bin
           mv nullclaw-linux-riscv64/nullclaw nullclaw-linux-riscv64.bin
           mv nullclaw-android-aarch64/nullclaw nullclaw-android-aarch64.bin
           mv nullclaw-android-armv7/nullclaw nullclaw-android-armv7.bin
@@ -164,6 +176,8 @@ jobs:
           files: |
             nullclaw-linux-x86_64.bin
             nullclaw-linux-aarch64.bin
+            nullclaw-linux-arm32-gnu.bin
+            nullclaw-linux-arm32-musl.bin
             nullclaw-linux-riscv64.bin
             nullclaw-android-aarch64.bin
             nullclaw-android-armv7.bin
