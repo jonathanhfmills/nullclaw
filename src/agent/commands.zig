@@ -2511,8 +2511,10 @@ fn hotReloadValueJson(
     path: []const u8,
 ) ![]u8 {
     if (std.mem.eql(u8, path, "agents.defaults.model.primary")) {
-        const model = cfg.default_model orelse return try allocator.dupe(u8, "null");
-        return try std.fmt.allocPrint(allocator, "\"{s}/{s}\"", .{ cfg.default_provider, model });
+        const model = cfg.default_model orelse return allocator.dupe(u8, "null");
+        const primary = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cfg.default_provider, model });
+        defer allocator.free(primary);
+        return try std.json.Stringify.valueAlloc(allocator, std.json.Value{ .string = primary }, .{});
     }
 
     if (std.mem.eql(u8, path, "default_temperature")) {
