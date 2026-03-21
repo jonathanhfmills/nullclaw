@@ -3231,6 +3231,52 @@ test "json parse diagnostics section" {
     allocator.free(cfg.diagnostics.otel_headers);
 }
 
+test "json parse diagnostics section accepts flat otel fields for compatibility" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"diagnostics": {"backend": "otel", "otel_endpoint": "http://otel:4318", "otel_service_name": "nullclaw", "otel_headers": {"Authorization": "Bearer test"}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("otel", cfg.diagnostics.backend);
+    try std.testing.expectEqualStrings("http://otel:4318", cfg.diagnostics.otel_endpoint.?);
+    try std.testing.expectEqualStrings("nullclaw", cfg.diagnostics.otel_service_name.?);
+    try std.testing.expectEqual(@as(usize, 1), cfg.diagnostics.otel_headers.len);
+    try std.testing.expectEqualStrings("Authorization", cfg.diagnostics.otel_headers[0].key);
+    try std.testing.expectEqualStrings("Bearer test", cfg.diagnostics.otel_headers[0].value);
+    allocator.free(cfg.diagnostics.backend);
+    allocator.free(cfg.diagnostics.otel_endpoint.?);
+    allocator.free(cfg.diagnostics.otel_service_name.?);
+    for (cfg.diagnostics.otel_headers) |header| {
+        allocator.free(header.key);
+        allocator.free(header.value);
+    }
+    allocator.free(cfg.diagnostics.otel_headers);
+}
+
+test "json parse diagnostics section prefers nested otel fields over flat compatibility aliases" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"diagnostics": {"backend": "otel", "otel_endpoint": "http://flat:4318", "otel_service_name": "flat-service", "otel_headers": {"Authorization": "Bearer flat"}, "otel": {"endpoint": "http://nested:4318", "service_name": "nested-service", "headers": {"Authorization": "Bearer nested"}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("otel", cfg.diagnostics.backend);
+    try std.testing.expectEqualStrings("http://nested:4318", cfg.diagnostics.otel_endpoint.?);
+    try std.testing.expectEqualStrings("nested-service", cfg.diagnostics.otel_service_name.?);
+    try std.testing.expectEqual(@as(usize, 1), cfg.diagnostics.otel_headers.len);
+    try std.testing.expectEqualStrings("Authorization", cfg.diagnostics.otel_headers[0].key);
+    try std.testing.expectEqualStrings("Bearer nested", cfg.diagnostics.otel_headers[0].value);
+    allocator.free(cfg.diagnostics.backend);
+    allocator.free(cfg.diagnostics.otel_endpoint.?);
+    allocator.free(cfg.diagnostics.otel_service_name.?);
+    for (cfg.diagnostics.otel_headers) |header| {
+        allocator.free(header.key);
+        allocator.free(header.value);
+    }
+    allocator.free(cfg.diagnostics.otel_headers);
+}
+
 test "json parse scheduler section" {
     const allocator = std.testing.allocator;
     const json =
