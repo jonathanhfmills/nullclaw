@@ -105,6 +105,9 @@ const compat_providers = [_]CompatProvider{
     .{ .name = "doubao", .url = "https://ark.cn-beijing.volces.com/api/v3", .display = "Doubao" },
     .{ .name = "volcengine", .url = "https://ark.cn-beijing.volces.com/api/v3", .display = "Doubao" },
     .{ .name = "ark", .url = "https://ark.cn-beijing.volces.com/api/v3", .display = "Doubao" },
+    .{ .name = "hunyuan", .url = "https://api.hunyuan.cloud.tencent.com/v1", .display = "Hunyuan" },
+    .{ .name = "tencent", .url = "https://api.hunyuan.cloud.tencent.com/v1", .display = "Hunyuan" },
+    .{ .name = "baichuan", .url = "https://api.baichuan-ai.com/v1", .display = "Baichuan" },
 
     // ── China Providers — CN endpoints ────────────────────────────────────
     .{ .name = "moonshot-cn", .url = "https://api.moonshot.cn/v1", .display = "Moonshot" },
@@ -554,6 +557,9 @@ test "compatibleProviderUrl CN/intl variants" {
     try std.testing.expectEqualStrings("https://api.z.ai/api/paas/v4", compatibleProviderUrl("glm-global").?);
     try std.testing.expectEqualStrings("https://api.minimaxi.com/v1", compatibleProviderUrl("minimax-cn").?);
     try std.testing.expectEqualStrings("https://api.minimax.io/v1", compatibleProviderUrl("minimax-intl").?);
+    try std.testing.expectEqualStrings("https://api.hunyuan.cloud.tencent.com/v1", compatibleProviderUrl("hunyuan").?);
+    try std.testing.expectEqualStrings("https://api.hunyuan.cloud.tencent.com/v1", compatibleProviderUrl("tencent").?);
+    try std.testing.expectEqualStrings("https://api.baichuan-ai.com/v1", compatibleProviderUrl("baichuan").?);
 }
 
 test "nvidia resolves to correct URL" {
@@ -584,6 +590,9 @@ test "new providers display names" {
     try std.testing.expectEqualStrings("Hugging Face", compatibleProviderDisplayName("huggingface"));
     try std.testing.expectEqualStrings("vLLM", compatibleProviderDisplayName("vllm"));
     try std.testing.expectEqualStrings("OVHcloud", compatibleProviderDisplayName("ovhcloud"));
+    try std.testing.expectEqualStrings("Hunyuan", compatibleProviderDisplayName("hunyuan"));
+    try std.testing.expectEqualStrings("Hunyuan", compatibleProviderDisplayName("tencent"));
+    try std.testing.expectEqualStrings("Baichuan", compatibleProviderDisplayName("baichuan"));
     try std.testing.expectEqualStrings("Novita", compatibleProviderDisplayName("novita"));
     try std.testing.expectEqualStrings("Novita", compatibleProviderDisplayName("novita-ai"));
     try std.testing.expectEqualStrings("Custom", compatibleProviderDisplayName("nonexistent"));
@@ -598,6 +607,9 @@ test "new providers classify as compatible" {
     try std.testing.expect(classifyProvider("lm-studio") == .compatible_provider);
     try std.testing.expect(classifyProvider("astrai") == .compatible_provider);
     try std.testing.expect(classifyProvider("telnyx") == .compatible_provider);
+    try std.testing.expect(classifyProvider("hunyuan") == .compatible_provider);
+    try std.testing.expect(classifyProvider("tencent") == .compatible_provider);
+    try std.testing.expect(classifyProvider("baichuan") == .compatible_provider);
     try std.testing.expect(classifyProvider("novita") == .compatible_provider);
     try std.testing.expect(classifyProvider("novita-ai") == .compatible_provider);
 }
@@ -910,7 +922,7 @@ test "ProviderHolder.fromConfig routes to correct variant" {
 
 test "compat_providers table count" {
     // Verify we have the expected number of entries (guard against accidental deletions).
-    try std.testing.expect(compat_providers.len >= 89);
+    try std.testing.expect(compat_providers.len >= 92);
 }
 
 test "fromConfig threads max_streaming_prompt_bytes to azure branch" {
