@@ -640,7 +640,9 @@ pub const OpenAiCompatibleProvider = struct {
                 const msg_obj = msg.object;
 
                 var content: ?[]const u8 = null;
+                errdefer if (content) |c| if (c.len > 0) allocator.free(c);
                 var reasoning_content: ?[]const u8 = null;
+                errdefer if (reasoning_content) |rc| if (rc.len > 0) allocator.free(rc);
                 if (msg_obj.get("content")) |c| {
                     if (c == .string) {
                         const split = try splitThinkContent(allocator, c.string);
@@ -665,6 +667,14 @@ pub const OpenAiCompatibleProvider = struct {
                 }
 
                 var tool_calls_list: std.ArrayListUnmanaged(ToolCall) = .empty;
+                errdefer {
+                    for (tool_calls_list.items) |tc| {
+                        if (tc.id.len > 0) allocator.free(tc.id);
+                        if (tc.name.len > 0) allocator.free(tc.name);
+                        if (tc.arguments.len > 0) allocator.free(tc.arguments);
+                    }
+                    tool_calls_list.deinit(allocator);
+                }
 
                 if (msg_obj.get("tool_calls")) |tc_arr| {
                     for (tc_arr.array.items) |tc| {
@@ -685,6 +695,19 @@ pub const OpenAiCompatibleProvider = struct {
                     }
                 }
 
+                // Treat a response with no content, no tool calls, and no reasoning as empty.
+                // This happens when the model hits its context limit and returns finish_reason=length
+                // with a null or empty content field. Returning NoResponseContent here lets the
+                // agent's empty-response retry and model-fallback logic engage rather than
+                // silently succeeding with nothing to show.
+                const has_content = content != null and content.?.len > 0;
+                const has_tools = tool_calls_list.items.len > 0;
+                const has_reasoning = reasoning_content != null and reasoning_content.?.len > 0;
+                if (!has_content and !has_tools and !has_reasoning) {
+                    log.warn("parseNativeResponse: response has no content, tool calls, or reasoning; treating as NoResponseContent", .{});
+                    return error.NoResponseContent;
+                }
+
                 var usage = TokenUsage{};
                 if (root_obj.get("usage")) |usage_obj| {
                     if (usage_obj == .object) {
@@ -700,32 +723,18 @@ pub const OpenAiCompatibleProvider = struct {
                     }
                 }
 
-                const model_str = if (root_obj.get("model")) |m| (if (m == .string) try allocator.dupe(u8, m.string) else try allocator.dupe(u8, "")) else try allocator.dupe(u8, "");
-
                 const owned_tool_calls = try tool_calls_list.toOwnedSlice(allocator);
-
-                // Treat a response with no content, no tool calls, and no reasoning as empty.
-                // This happens when the model hits its context limit and returns finish_reason=length
-                // with a null or empty content field. Returning NoResponseContent here lets the
-                // agent's empty-response retry and model-fallback logic engage rather than
-                // silently succeeding with nothing to show.
-                const has_content = content != null and content.?.len > 0;
-                const has_tools = owned_tool_calls.len > 0;
-                const has_reasoning = reasoning_content != null and reasoning_content.?.len > 0;
-                if (!has_content and !has_tools and !has_reasoning) {
-                    log.warn("parseNativeResponse: response has no content, tool calls, or reasoning — treating as NoResponseContent", .{});
-                    // Free allocations made before this guard fires to avoid a leak.
-                    if (content) |c| if (c.len > 0) allocator.free(c);
-                    if (reasoning_content) |rc| if (rc.len > 0) allocator.free(rc);
+                errdefer {
                     for (owned_tool_calls) |tc| {
                         if (tc.id.len > 0) allocator.free(tc.id);
                         if (tc.name.len > 0) allocator.free(tc.name);
                         if (tc.arguments.len > 0) allocator.free(tc.arguments);
                     }
                     if (owned_tool_calls.len > 0) allocator.free(owned_tool_calls);
-                    allocator.free(model_str);
-                    return error.NoResponseContent;
                 }
+
+                const model_str = if (root_obj.get("model")) |m| (if (m == .string) try allocator.dupe(u8, m.string) else try allocator.dupe(u8, "")) else try allocator.dupe(u8, "");
+                errdefer if (model_str.len > 0) allocator.free(model_str);
 
                 return .{
                     .content = content,
@@ -1348,6 +1357,16 @@ test "parseNativeResponse null content with no tools or reasoning returns NoResp
     // parseNativeResponse must return NoResponseContent so the agent's retry/fallback chain engages.
     const body =
         \\{"choices":[{"message":{"content":null},"finish_reason":"length"}],"model":"glm-5"}
+    ;
+    try std.testing.expectError(
+        error.NoResponseContent,
+        OpenAiCompatibleProvider.parseNativeResponse(std.testing.allocator, body),
+    );
+}
+
+test "parseNativeResponse empty string content with no tools or reasoning returns NoResponseContent" {
+    const body =
+        \\{"choices":[{"message":{"content":""},"finish_reason":"length"}],"model":"glm-5"}
     ;
     try std.testing.expectError(
         error.NoResponseContent,
