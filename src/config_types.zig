@@ -1305,6 +1305,14 @@ pub const GatewayConfig = struct {
     webhook_rate_limit_per_minute: u32 = 60,
     idempotency_ttl_secs: u64 = 300,
     paired_tokens: []const []const u8 = &.{},
+    /// Maximum HTTP request body size in bytes.
+    /// Default 65536 (64 KB). Raise this when the gateway is configured
+    /// for multi-modal use and needs to accept image payloads.
+    max_body_size_bytes: usize = 65_536,
+    /// Socket read timeout for incoming HTTP requests in seconds.
+    /// Default 30s. Raise this when accepting large payloads (e.g. images)
+    /// over slow or high-latency connections.
+    request_timeout_secs: u64 = 30,
 };
 
 // ── A2A (Agent-to-Agent) protocol config ────────────────────────

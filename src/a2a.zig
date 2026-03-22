@@ -381,7 +381,10 @@ pub const A2aResponse = struct {
 
 // ── Handler: Agent Card ─────────────────────────────────────────
 
-pub fn handleAgentCard(allocator: std.mem.Allocator, cfg: *const Config) A2aResponse {
+/// Build the A2A agent card JSON response.
+/// vision_capable: probe result from SessionManager.probeVision(); null = not yet probed.
+/// The effective multi_modal flag is: vision_capable if set, else cfg.a2a.multi_modal (manual override).
+pub fn handleAgentCard(allocator: std.mem.Allocator, cfg: *const Config, vision_capable: ?bool) A2aResponse {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -415,7 +418,9 @@ pub fn handleAgentCard(allocator: std.mem.Allocator, cfg: *const Config) A2aResp
         w.writeAll("https://github.com/nullclaw/nullclaw") catch return errorResponse();
     }
     w.writeAll("\"}") catch return errorResponse();
-    if (cfg.a2a.multi_modal) {
+    // multi_modal: live probe result takes precedence; fall back to manual config flag.
+    const effective_multi_modal = vision_capable orelse cfg.a2a.multi_modal;
+    if (effective_multi_modal) {
         w.writeAll(",\"capabilities\":{\"streaming\":true,\"multi_modal\":true}") catch return errorResponse();
     } else {
         w.writeAll(",\"capabilities\":{\"streaming\":true}") catch return errorResponse();
@@ -553,10 +558,11 @@ pub fn handleStreamingRpc(
         return;
     }
 
-    const text = extractMessageText(body) orelse {
+    const text = (extractMessageContent(allocator, body) catch null) orelse {
         writeSseError(allocator, stream, request_id, -32602, "Missing message text");
         return;
     };
+    defer allocator.free(text);
 
     // v0.3.0: messageId is required on Message.
     if (extractMessageMessageId(body) == null) {
@@ -697,11 +703,12 @@ fn handleSendMessage(
     registry: *TaskRegistry,
     session_mgr: anytype,
 ) A2aResponse {
-    const text = extractMessageText(body) orelse {
+    const text = (extractMessageContent(allocator, body) catch null) orelse {
         const err_body = buildJsonRpcError(allocator, request_id, -32602, "Missing message text") catch
             return errorResponse();
         return .{ .body = err_body };
     };
+    defer allocator.free(text);
 
     // v0.3.0: messageId is required on Message.
     if (extractMessageMessageId(body) == null) {
@@ -1317,6 +1324,68 @@ fn extractMessageText(body: []const u8) ?[]const u8 {
     return extractArrayObjectStringField(parts, "text");
 }
 
+/// Extract message content from all A2A parts, combining text parts and converting
+/// inlineData parts to [IMAGE:data:mime;base64,...] markers understood by the multimodal
+/// pipeline. Returns an allocated string the caller must free; returns null only when
+/// there are no parts at all (no text and no inlineData).
+fn extractMessageContent(allocator: std.mem.Allocator, body: []const u8) !?[]u8 {
+    const params = extractParamsObject(body) orelse return null;
+    const message = extractObjectObjectField(params, "message") orelse return null;
+    const parts_json = extractObjectArrayField(message, "parts") orelse return null;
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    errdefer buf.deinit(allocator);
+
+    // Walk every element of the parts array.
+    var i = skipJsonWhitespace(parts_json, 0);
+    if (i >= parts_json.len or parts_json[i] != '[') return null;
+    i += 1;
+
+    var found_any = false;
+    while (true) {
+        i = skipJsonWhitespace(parts_json, i);
+        if (i >= parts_json.len) break;
+        if (parts_json[i] == ']') break;
+
+        const elem_start = i;
+        const elem_end = scanJsonValueEnd(parts_json, i) orelse break;
+        const elem = parts_json[elem_start..elem_end];
+
+        // Text part — append to buffer (space-separated from prior content).
+        if (extractObjectStringField(elem, "text")) |text| {
+            if (buf.items.len > 0) try buf.append(allocator, ' ');
+            try buf.appendSlice(allocator, text);
+            found_any = true;
+        }
+
+        // inlineData part — convert to [IMAGE:data:<mimeType>;base64,<data>] marker.
+        if (extractObjectObjectField(elem, "inlineData")) |inline_data| {
+            if (extractObjectStringField(inline_data, "mimeType")) |mime| {
+                if (extractObjectStringField(inline_data, "data")) |b64| {
+                    if (buf.items.len > 0) try buf.append(allocator, ' ');
+                    try buf.appendSlice(allocator, "[IMAGE:data:");
+                    try buf.appendSlice(allocator, mime);
+                    try buf.appendSlice(allocator, ";base64,");
+                    try buf.appendSlice(allocator, b64);
+                    try buf.append(allocator, ']');
+                    found_any = true;
+                }
+            }
+        }
+
+        i = skipJsonWhitespace(parts_json, elem_end);
+        if (i >= parts_json.len) break;
+        if (parts_json[i] == ',') {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+
+    if (!found_any) return null;
+    return try buf.toOwnedSlice(allocator);
+}
+
 fn extractMessageContextId(body: []const u8) ?[]const u8 {
     const params = extractParamsObject(body) orelse return null;
     const message = extractObjectObjectField(params, "message") orelse return null;
@@ -1657,7 +1726,7 @@ test "TaskRegistry evicts oldest completed tasks by recency" {
 
 test "handleAgentCard returns valid JSON" {
     const cfg = testConfig();
-    const resp = handleAgentCard(testing.allocator, &cfg);
+    const resp = handleAgentCard(testing.allocator, &cfg, null);
     defer if (resp.allocated) testing.allocator.free(resp.body);
 
     try testing.expectEqualStrings("200 OK", resp.status);
@@ -1674,6 +1743,38 @@ test "handleAgentCard returns valid JSON" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "\"streaming\":true") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "\"defaultInputModes\":[\"text/plain\"]") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "\"skills\":[") != null);
+}
+
+test "handleAgentCard vision_capable=true overrides cfg.multi_modal=false" {
+    var cfg = testConfig();
+    cfg.a2a.multi_modal = false;
+    const resp = handleAgentCard(testing.allocator, &cfg, true);
+    defer if (resp.allocated) testing.allocator.free(resp.body);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "\"multi_modal\":true") != null);
+}
+
+test "handleAgentCard vision_capable=false overrides cfg.multi_modal=true" {
+    var cfg = testConfig();
+    cfg.a2a.multi_modal = true;
+    const resp = handleAgentCard(testing.allocator, &cfg, false);
+    defer if (resp.allocated) testing.allocator.free(resp.body);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "\"multi_modal\"") == null);
+}
+
+test "handleAgentCard vision_capable=null falls back to cfg.multi_modal=true" {
+    var cfg = testConfig();
+    cfg.a2a.multi_modal = true;
+    const resp = handleAgentCard(testing.allocator, &cfg, null);
+    defer if (resp.allocated) testing.allocator.free(resp.body);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "\"multi_modal\":true") != null);
+}
+
+test "handleAgentCard vision_capable=null falls back to cfg.multi_modal=false" {
+    var cfg = testConfig();
+    cfg.a2a.multi_modal = false;
+    const resp = handleAgentCard(testing.allocator, &cfg, null);
+    defer if (resp.allocated) testing.allocator.free(resp.body);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "\"multi_modal\"") == null);
 }
 
 test "handleJsonRpc dispatches message/send with string id" {
@@ -1797,6 +1898,67 @@ test "extractMessageText returns null for missing parts" {
         \\{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user"}}}
     ;
     try testing.expect(extractMessageText(body) == null);
+}
+
+test "extractMessageContent returns text-only message unchanged" {
+    const body =
+        \\{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"messageId":"msg-1","role":"user","parts":[{"kind":"text","text":"What is this?"}]}}}
+    ;
+    const result = try extractMessageContent(testing.allocator, body);
+    try testing.expect(result != null);
+    defer testing.allocator.free(result.?);
+    try testing.expectEqualStrings("What is this?", result.?);
+}
+
+test "extractMessageContent injects IMAGE marker for inlineData part" {
+    const body =
+        \\{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"messageId":"msg-1","role":"user","parts":[{"kind":"text","text":"Describe this"},{"inlineData":{"mimeType":"image/jpeg","data":"iVBORw0KGgo="}}]}}}
+    ;
+    const result = try extractMessageContent(testing.allocator, body);
+    try testing.expect(result != null);
+    defer testing.allocator.free(result.?);
+    try testing.expect(std.mem.startsWith(u8, result.?, "Describe this "));
+    try testing.expect(std.mem.indexOf(u8, result.?, "[IMAGE:data:image/jpeg;base64,iVBORw0KGgo=]") != null);
+}
+
+test "extractMessageContent image-only message produces marker with no leading space" {
+    const body =
+        \\{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"messageId":"msg-1","role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"ABC123=="}}]}}}
+    ;
+    const result = try extractMessageContent(testing.allocator, body);
+    try testing.expect(result != null);
+    defer testing.allocator.free(result.?);
+    try testing.expectEqualStrings("[IMAGE:data:image/png;base64,ABC123==]", result.?);
+}
+
+test "extractMessageContent multiple inlineData parts produce multiple markers" {
+    const body =
+        \\{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"messageId":"msg-1","role":"user","parts":[{"kind":"text","text":"Compare"},{"inlineData":{"mimeType":"image/jpeg","data":"AAA="}},{"inlineData":{"mimeType":"image/png","data":"BBB="}}]}}}
+    ;
+    const result = try extractMessageContent(testing.allocator, body);
+    try testing.expect(result != null);
+    defer testing.allocator.free(result.?);
+    try testing.expect(std.mem.indexOf(u8, result.?, "Compare") != null);
+    try testing.expect(std.mem.indexOf(u8, result.?, "[IMAGE:data:image/jpeg;base64,AAA=]") != null);
+    try testing.expect(std.mem.indexOf(u8, result.?, "[IMAGE:data:image/png;base64,BBB=]") != null);
+}
+
+test "extractMessageContent returns null when no parts present" {
+    const body =
+        \\{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"messageId":"msg-1","role":"user","parts":[]}}}
+    ;
+    const result = try extractMessageContent(testing.allocator, body);
+    try testing.expect(result == null);
+}
+
+test "extractMessageContent ignores parts without text or inlineData" {
+    const body =
+        \\{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"messageId":"msg-1","role":"user","parts":[{"kind":"unknown"},{"kind":"text","text":"Hi"}]}}}
+    ;
+    const result = try extractMessageContent(testing.allocator, body);
+    try testing.expect(result != null);
+    defer testing.allocator.free(result.?);
+    try testing.expectEqualStrings("Hi", result.?);
 }
 
 test "handleJsonRpc dispatches tasks/cancel" {
