@@ -160,16 +160,22 @@ pub const DeliveryOutbox = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const job = try self.jobFromOutboundLocked(msg);
-        errdefer {
-            var tmp = job;
-            tmp.deinit(self.allocator);
-        }
+        var job = try self.jobFromOutboundLocked(msg);
+        const job_id = job.id;
+        self.jobs.append(self.allocator, job) catch |err| {
+            job.deinit(self.allocator);
+            return err;
+        };
 
-        try self.jobs.append(self.allocator, job);
+        const previous_next_id = self.next_id;
+        errdefer {
+            var removed = self.jobs.swapRemove(self.jobs.items.len - 1);
+            removed.deinit(self.allocator);
+            self.next_id = previous_next_id;
+        }
         self.next_id += 1;
         try self.saveLocked();
-        return job.id;
+        return job_id;
     }
 
     pub fn pendingCount(self: *Self) usize {
@@ -587,6 +593,33 @@ test "delivery outbox persists and reloads final message" {
     try std.testing.expectEqualStrings("chat-1", claimed.chat_id);
     try std.testing.expectEqualStrings("hello", claimed.content);
     try std.testing.expectEqual(@as(usize, 1), claimed.choices.len);
+}
+
+// Regression: a failed save must not leave a phantom in-memory job behind.
+test "delivery outbox rolls back failed enqueue persistence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_root);
+    const state_dir = try std.fs.path.join(std.testing.allocator, &.{ tmp_root, "missing" });
+    defer std.testing.allocator.free(state_dir);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ state_dir, "outbox.json" });
+    defer std.testing.allocator.free(path);
+
+    var outbox = try DeliveryOutbox.init(std.testing.allocator, path);
+    defer outbox.deinit();
+
+    var msg = try bus.makeOutbound(std.testing.allocator, "qq", "chat-1", "hello");
+    defer msg.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.FileNotFound, outbox.enqueueFinal(msg));
+    try std.testing.expectEqual(@as(usize, 0), outbox.pendingCount());
+    try std.testing.expect((try outbox.claimNextReady(std.testing.allocator, 0)) == null);
+
+    try std.fs.makeDirAbsolute(state_dir);
+    try std.testing.expectEqual(@as(u64, 1), try outbox.enqueueFinal(msg));
+    try std.testing.expectEqual(@as(usize, 1), outbox.pendingCount());
 }
 
 test "delivery outbox failure keeps job durable for retry" {

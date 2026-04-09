@@ -212,12 +212,13 @@ pub fn runOutboundDispatcherWithOutbox(
         if (channel_opt) |channel| {
             if (delivery_outbox) |outbox| {
                 if (shouldPersistFinalOutbound(msg)) {
-                    _ = outbox.enqueueFinal(msg) catch {
-                        _ = stats.errors.fetchAdd(1, .monotonic);
+                    if (outbox.enqueueFinal(msg)) |_| {
+                        _ = stats.dispatched.fetchAdd(1, .monotonic);
                         continue;
-                    };
-                    _ = stats.dispatched.fetchAdd(1, .monotonic);
-                    continue;
+                    } else |_| {
+                        // Fall back to the legacy direct path so a persistence
+                        // failure does not drop the final reply entirely.
+                    }
                 }
             }
             dispatchOutboundMessage(allocator, channel, msg, &draft_messages) catch {
@@ -1322,6 +1323,40 @@ test "dispatcher can enqueue final outbound into durable outbox" {
     try std.testing.expectEqual(@as(u64, 1), stats.getDispatched());
     try std.testing.expectEqual(@as(usize, 1), outbox.pendingCount());
     try std.testing.expectEqual(@as(u64, 0), mock_tg.sent_count.load(.monotonic));
+}
+
+// Regression: a durable enqueue failure must not drop the final reply.
+test "dispatcher falls back to direct send when durable enqueue fails" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_root);
+    const outbox_path = try std.fs.path.join(allocator, &.{ tmp_root, "missing", "delivery.json" });
+    defer allocator.free(outbox_path);
+
+    var outbox = try channel_outbox.DeliveryOutbox.init(allocator, outbox_path);
+    defer outbox.deinit();
+
+    var mock_tg = MockChannel{ .name_str = "telegram" };
+    var reg = ChannelRegistry.init(allocator);
+    defer reg.deinit();
+    try reg.register(mock_tg.channel());
+
+    var event_bus = bus.Bus.init();
+    var stats = DispatchStats{};
+
+    const msg = try bus.makeOutbound(allocator, "telegram", "chat1", "hello");
+    try event_bus.publishOutbound(msg);
+    event_bus.close();
+
+    runOutboundDispatcherWithOutbox(allocator, &event_bus, &reg, &stats, &outbox);
+
+    try std.testing.expectEqual(@as(u64, 1), stats.getDispatched());
+    try std.testing.expectEqual(@as(u64, 0), stats.getErrors());
+    try std.testing.expectEqual(@as(usize, 0), outbox.pendingCount());
+    try std.testing.expectEqual(@as(u64, 1), mock_tg.sent_count.load(.monotonic));
 }
 
 test "durable outbound worker retries persisted final delivery" {
