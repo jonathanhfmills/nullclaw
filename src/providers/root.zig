@@ -67,6 +67,7 @@ pub const extractContent = helpers.extractContent;
 pub const SplitThinkContent = helpers.SplitThinkContent;
 pub const splitThinkContent = helpers.splitThinkContent;
 pub const stripThinkBlocks = helpers.stripThinkBlocks;
+pub const extractReasoningTextFromDetails = helpers.extractReasoningTextFromDetails;
 pub const normalizeOpenAiReasoningEffort = helpers.normalizeOpenAiReasoningEffort;
 
 // Direct re-exports from utility modules
@@ -282,6 +283,8 @@ pub fn emitChatResponseAsStream(
     callback: StreamCallback,
     callback_ctx: *anyopaque,
 ) StreamChatResult {
+    const reasoning_content = response.reasoning_content;
+    response.reasoning_content = null;
     if (response.content) |content| {
         if (content.len > 0) {
             callback(callback_ctx, StreamChunk.textDelta(content));
@@ -291,6 +294,7 @@ pub fn emitChatResponseAsStream(
     freeStreamUnusedChatResponseFields(allocator, response);
     return .{
         .content = response.content,
+        .reasoning_content = reasoning_content,
         .usage = response.usage,
         .model = response.model,
     };
@@ -850,6 +854,7 @@ test "emitChatResponseAsStream frees unused chat response fields" {
     var ctx = CallbackCtx{};
     const result = emitChatResponseAsStream(allocator, &response, CallbackCtx.onChunk, @ptrCast(&ctx));
     defer if (result.content) |content| allocator.free(content);
+    defer if (result.reasoning_content) |reasoning| allocator.free(reasoning);
     defer if (result.model.len > 0) allocator.free(result.model);
 
     try std.testing.expectEqual(@as(usize, 1), ctx.text_count);
@@ -858,6 +863,7 @@ test "emitChatResponseAsStream frees unused chat response fields" {
     try std.testing.expectEqualStrings("", response.provider);
     try std.testing.expect(response.reasoning_content == null);
     try std.testing.expectEqualStrings("hello", result.content.?);
+    try std.testing.expectEqualStrings("private reasoning", result.reasoning_content.?);
     try std.testing.expectEqualStrings("test-model", result.model);
 }
 

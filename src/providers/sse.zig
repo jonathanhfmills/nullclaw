@@ -263,9 +263,10 @@ fn extractStreamUsage(json_str: []const u8) ?root.TokenUsage {
 }
 
 /// Extract visible streaming text from an SSE JSON payload.
-/// Falls back to `delta.reasoning` or `delta.reasoning_content` when providers stream their
-/// thinking trace separately and wraps it in think tags so higher layers can
-/// suppress it from user-visible output.
+/// Falls back to `delta.reasoning`, `delta.reasoning_content`, or
+/// `delta.reasoning_details` when providers stream their thinking trace
+/// separately and wraps it in think tags so higher layers can suppress it
+/// from user-visible output.
 /// Returns owned slice or null if no content found.
 pub fn extractDeltaContent(allocator: std.mem.Allocator, json_str: []const u8) !?[]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch
@@ -298,6 +299,13 @@ pub fn extractDeltaContent(allocator: std.mem.Allocator, json_str: []const u8) !
         if (reasoning_content == .string and reasoning_content.string.len > 0) {
             const wrapped = try std.fmt.allocPrint(allocator, "<think>{s}</think>", .{reasoning_content.string});
             return wrapped;
+        }
+    }
+
+    if (delta.object.get("reasoning_details")) |reasoning_details| {
+        if (try root.extractReasoningTextFromDetails(allocator, reasoning_details)) |reasoning_text| {
+            defer allocator.free(reasoning_text);
+            return try std.fmt.allocPrint(allocator, "<think>{s}</think>", .{reasoning_text});
         }
     }
 
@@ -1017,6 +1025,17 @@ test "extractDeltaContent falls back to reasoning_content when content missing" 
     const result = (try extractDeltaContent(allocator, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"step by step\"}}]}")).?;
     defer allocator.free(result);
     try std.testing.expectEqualStrings("<think>step by step</think>", result);
+}
+
+// Regression: OpenRouter's current normalized streaming shape uses reasoning_details.
+test "extractDeltaContent falls back to reasoning_details when content missing" {
+    const allocator = std.testing.allocator;
+    const result = (try extractDeltaContent(
+        allocator,
+        "{\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.summary\",\"summary\":\"plan\"},{\"type\":\"reasoning.text\",\"text\":\"step by step\"}]}}]}",
+    )).?;
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("<think>plan\nstep by step</think>", result);
 }
 
 test "extractDeltaContent prefers visible content over reasoning_content" {

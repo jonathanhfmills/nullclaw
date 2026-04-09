@@ -121,6 +121,8 @@ pub const OpenRouterProvider = struct {
 
                 var content: ?[]const u8 = null;
                 var reasoning_content: ?[]const u8 = null;
+                errdefer if (content) |c| if (c.len > 0) allocator.free(c);
+                errdefer if (reasoning_content) |rc| if (rc.len > 0) allocator.free(rc);
                 if (msg_obj.get("content")) |c| {
                     if (c == .string) {
                         const split = try root.splitThinkContent(allocator, c.string);
@@ -144,8 +146,21 @@ pub const OpenRouterProvider = struct {
                             reasoning_content = try allocator.dupe(u8, rc.string);
                     }
                 }
+                if (reasoning_content == null) {
+                    if (msg_obj.get("reasoning_details")) |details| {
+                        reasoning_content = try root.extractReasoningTextFromDetails(allocator, details);
+                    }
+                }
 
                 var tool_calls_list: std.ArrayListUnmanaged(ToolCall) = .empty;
+                errdefer {
+                    for (tool_calls_list.items) |tc| {
+                        if (tc.id.len > 0) allocator.free(tc.id);
+                        if (tc.name.len > 0) allocator.free(tc.name);
+                        if (tc.arguments.len > 0) allocator.free(tc.arguments);
+                    }
+                    tool_calls_list.deinit(allocator);
+                }
 
                 if (msg_obj.get("tool_calls")) |tc_arr| {
                     for (tc_arr.array.items) |tc| {
@@ -931,6 +946,22 @@ test "parseNativeResponse reads native reasoning_content field" {
     }
     try std.testing.expectEqualStrings("The answer is 42", response.content.?);
     try std.testing.expectEqualStrings("I computed this", response.reasoning_content.?);
+}
+
+test "parseNativeResponse reads reasoning_details field" {
+    const body =
+        \\{"choices":[{"message":{"content":"Visible answer","reasoning_details":[{"type":"reasoning.summary","summary":"plan"},{"type":"reasoning.text","text":"step by step"}]}}],"model":"moonshotai/kimi-k2.5","usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}
+    ;
+    const alloc = std.testing.allocator;
+    const response = try OpenRouterProvider.parseNativeResponse(alloc, body);
+    defer {
+        if (response.content) |c| alloc.free(c);
+        if (response.reasoning_content) |rc| alloc.free(rc);
+        alloc.free(response.tool_calls);
+        alloc.free(response.model);
+    }
+    try std.testing.expectEqualStrings("Visible answer", response.content.?);
+    try std.testing.expectEqualStrings("plan\nstep by step", response.reasoning_content.?);
 }
 
 test "parseNativeResponse no think tags leaves reasoning_content null" {
