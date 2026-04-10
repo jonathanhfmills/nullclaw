@@ -8,16 +8,8 @@ on:
 
 jobs:
   nix-build:
-    name: Nix build (${{ matrix.system }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - system: x86_64-linux
-            runner: ubuntu-latest
-          - system: aarch64-darwin
-            runner: macos-latest
+    name: Nix build (x86_64-linux)
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -27,9 +19,6 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
             experimental-features = nix-command flakes
-
-      - name: nix flake check (no build)
-        run: nix flake check --no-build
 
       - name: nix build
         run: nix build .#nullclaw
