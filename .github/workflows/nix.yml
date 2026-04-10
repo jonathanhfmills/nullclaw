@@ -14,6 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Ubuntu 24.04 restricts user namespace creation via AppArmor by default.
+      # Nix's sandbox (bwrap) and zig2nix's bootstrap build both need them.
       - name: Allow user namespaces (required for zig2nix bwrap on Ubuntu 24.04)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
