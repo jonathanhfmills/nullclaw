@@ -1,4 +1,4 @@
-name: Nix
+name: CI
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   nix-build:
-    name: Nix build (x86_64-linux)
+    name: Test (nixos-latest)
     runs-on: ubuntu-latest
 
     steps:
