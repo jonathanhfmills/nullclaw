@@ -19,6 +19,7 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
             experimental-features = nix-command flakes
+            sandbox = false
 
       - name: nix build
         run: nix build .
