@@ -14,8 +14,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Enable user namespaces (required for Nix sandbox + zig2nix bwrap)
-        run: sudo sysctl -w kernel.unprivileged_userns_clone=1
+      - name: Allow user namespaces (required for zig2nix bwrap on Ubuntu 24.04)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
 
       - uses: cachix/install-nix-action@v31
         with:
