@@ -22,7 +22,7 @@ jobs:
             sandbox = false
 
       - name: nix build
-        run: nix build .
+        run: nix build . --option sandbox false
 
       - name: Smoke test
         run: |
